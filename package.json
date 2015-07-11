@@ -8,10 +8,10 @@
         "url": "https://github.com/Nekroze/libphoenix.git"
     },
     "scripts": {
-        "compile": "babel -d lib/ phoenix/web/static/js",
+        "compile": "babel -o libphoenix.js phoenix/web/static/js",
         "prepublish": "npm run compile"
     },
-    "main": "lib/phoenix.js",
+    "main": "libphoenix.js",
     "dependencies": {
         "core-js": "^0.6.0"
     },
