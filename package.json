@@ -1,6 +1,9 @@
 {
-    "name": "phoenix",
+    "name": "libphoenix",
+    "description": "The Phoenix Framework javascript library transpiled for node.",
+    "license": "MIT",
     "version": "0.14.0",
+    "repository": "https://github.com/Nekroze/libphoenix.git",
     "scripts": {
         "compile": "babel -d lib/ phoenix/web/static/js",
         "prepublish": "npm run compile"
