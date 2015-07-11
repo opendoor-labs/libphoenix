@@ -3,7 +3,10 @@
     "description": "The Phoenix Framework javascript library transpiled for node.",
     "license": "MIT",
     "version": "0.14.0",
-    "repository": "https://github.com/Nekroze/libphoenix.git",
+    "repository": {
+        "type": "git",
+        "url": "https://github.com/Nekroze/libphoenix.git"
+    },
     "scripts": {
         "compile": "babel -d lib/ phoenix/web/static/js",
         "prepublish": "npm run compile"
@@ -14,5 +17,15 @@
     },
     "devDependencies": {
         "babel": "^4.6.0"
-    }
+    },
+    "bugs": {
+        "url": "https://github.com/Nekroze/libphoenix/issues"
+    },
+    "homepage": "https://github.com/Nekroze/libphoenix#readme",
+    "keywords": [
+        "elixir",
+        "erlang",
+        "phoenix"
+    ],
+    "author": "Taylor \"Nekroze\" Lawson <tlawson@nekroze.com> (https://nekroze.com)"
 }
