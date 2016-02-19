@@ -30,20 +30,20 @@ Object.defineProperty(exports, "__esModule", {
 // To join a channel, you must provide the topic, and channel params for
 // authorization. Here's an example chat room example where `"new_msg"`
 // events are listened for, messages are pushed to the server, and
-// the channel is joined with ok/error matches, and `after` hook:
+// the channel is joined with ok/error/timeout matches:
 //
 //     let channel = socket.channel("rooms:123", {token: roomToken})
 //     channel.on("new_msg", msg => console.log("Got message", msg) )
 //     $input.onEnter( e => {
-//       channel.push("new_msg", {body: e.target.val})
+//       channel.push("new_msg", {body: e.target.val}, 10000)
 //        .receive("ok", (msg) => console.log("created message", msg) )
 //        .receive("error", (reasons) => console.log("create failed", reasons) )
-//        .after(10000, () => console.log("Networking issue. Still waiting...") )
+//        .receive("timeout", () => console.log("Networking issue...") )
 //     })
 //     channel.join()
 //       .receive("ok", ({messages}) => console.log("catching up", messages) )
 //       .receive("error", ({reason}) => console.log("failed join", reason) )
-//       .after(10000, () => console.log("Networking issue. Still waiting...") )
+//       .receive("timeout", () => console.log("Networking issue. Still waiting...") )
 //
 //
 // ## Joining
@@ -60,8 +60,8 @@ Object.defineProperty(exports, "__esModule", {
 // From the previous example, we can see that pushing messages to the server
 // can be done with `channel.push(eventName, payload)` and we can optionally
 // receive responses from the push. Additionally, we can use
-// `after(millsec, callback)` to abort waiting for our `receive` hooks and
-// take action after some period of waiting.
+// `receive("timeout", callback)` to abort waiting for our other `receive` hooks
+//  and take action after some period of waiting.
 //
 //
 // ## Socket Hooks
@@ -96,6 +96,7 @@ Object.defineProperty(exports, "__esModule", {
 
 var VSN = "1.0.0";
 var SOCKET_STATES = { connecting: 0, open: 1, closing: 2, closed: 3 };
+var DEFAULT_TIMEOUT = 10000;
 var CHANNEL_STATES = {
   closed: "closed",
   errored: "errored",
@@ -120,67 +121,56 @@ var Push = (function () {
   // channel - The Channel
   // event - The event, for example `"phx_join"`
   // payload - The payload, for example `{user_id: 123}`
+  // timeout - The push timeout in milliseconds
   //
 
-  function Push(channel, event, payload) {
+  function Push(channel, event, payload, timeout) {
     _classCallCheck(this, Push);
 
     this.channel = channel;
     this.event = event;
     this.payload = payload || {};
     this.receivedResp = null;
-    this.afterHook = null;
+    this.timeout = timeout;
+    this.timeoutTimer = null;
     this.recHooks = [];
     this.sent = false;
   }
 
   _createClass(Push, {
-    send: {
-      value: function send() {
-        var _this = this;
-
-        var ref = this.channel.socket.makeRef();
-        this.refEvent = this.channel.replyEventName(ref);
+    resend: {
+      value: function resend(timeout) {
+        this.timeout = timeout;
+        this.cancelRefEvent();
+        this.ref = null;
+        this.refEvent = null;
         this.receivedResp = null;
         this.sent = false;
-
-        this.channel.on(this.refEvent, function (payload) {
-          _this.receivedResp = payload;
-          _this.matchReceive(payload);
-          _this.cancelRefEvent();
-          _this.cancelAfter();
-        });
-
-        this.startAfter();
+        this.send();
+      }
+    },
+    send: {
+      value: function send() {
+        if (this.hasReceived("timeout")) {
+          return;
+        }
+        this.startTimeout();
         this.sent = true;
         this.channel.socket.push({
           topic: this.channel.topic,
           event: this.event,
           payload: this.payload,
-          ref: ref
+          ref: this.ref
         });
       }
     },
     receive: {
       value: function receive(status, callback) {
-        if (this.receivedResp && this.receivedResp.status === status) {
+        if (this.hasReceived(status)) {
           callback(this.receivedResp.response);
         }
 
         this.recHooks.push({ status: status, callback: callback });
-        return this;
-      }
-    },
-    after: {
-      value: function after(ms, callback) {
-        if (this.afterHook) {
-          throw "only a single after hook can be applied to a push";
-        }
-        var timer = null;
-        if (this.sent) {
-          timer = setTimeout(callback, ms);
-        }
-        this.afterHook = { ms: ms, callback: callback, timer: timer };
         return this;
       }
     },
@@ -202,30 +192,48 @@ var Push = (function () {
     },
     cancelRefEvent: {
       value: function cancelRefEvent() {
+        if (!this.refEvent) {
+          return;
+        }
         this.channel.off(this.refEvent);
       }
     },
-    cancelAfter: {
-      value: function cancelAfter() {
-        if (!this.afterHook) {
-          return;
-        }
-        clearTimeout(this.afterHook.timer);
-        this.afterHook.timer = null;
+    cancelTimeout: {
+      value: function cancelTimeout() {
+        clearTimeout(this.timeoutTimer);
+        this.timeoutTimer = null;
       }
     },
-    startAfter: {
-      value: function startAfter() {
+    startTimeout: {
+      value: function startTimeout() {
         var _this = this;
 
-        if (!this.afterHook) {
+        if (this.timeoutTimer) {
           return;
         }
-        var callback = function () {
+        this.ref = this.channel.socket.makeRef();
+        this.refEvent = this.channel.replyEventName(this.ref);
+
+        this.channel.on(this.refEvent, function (payload) {
           _this.cancelRefEvent();
-          _this.afterHook.callback();
-        };
-        this.afterHook.timer = setTimeout(callback, this.afterHook.ms);
+          _this.cancelTimeout();
+          _this.receivedResp = payload;
+          _this.matchReceive(payload);
+        });
+
+        this.timeoutTimer = setTimeout(function () {
+          _this.trigger("timeout", {});
+        }, this.timeout);
+      }
+    },
+    hasReceived: {
+      value: function hasReceived(status) {
+        return this.receivedResp && this.receivedResp.status === status;
+      }
+    },
+    trigger: {
+      value: function trigger(status, response) {
+        this.channel.trigger(this.refEvent, { status: status, response: response });
       }
     }
   });
@@ -244,8 +252,9 @@ var Channel = exports.Channel = (function () {
     this.params = params || {};
     this.socket = socket;
     this.bindings = [];
+    this.timeout = this.socket.timeout;
     this.joinedOnce = false;
-    this.joinPush = new Push(this, CHANNEL_EVENTS.join, this.params);
+    this.joinPush = new Push(this, CHANNEL_EVENTS.join, this.params, this.timeout);
     this.pushBuffer = [];
     this.rejoinTimer = new Timer(function () {
       return _this.rejoinUntilConnected();
@@ -253,6 +262,10 @@ var Channel = exports.Channel = (function () {
     this.joinPush.receive("ok", function () {
       _this.state = CHANNEL_STATES.joined;
       _this.rejoinTimer.reset();
+      _this.pushBuffer.forEach(function (pushEvent) {
+        return pushEvent.send();
+      });
+      _this.pushBuffer = [];
     });
     this.onClose(function () {
       _this.socket.log("channel", "close " + _this.topic);
@@ -261,6 +274,15 @@ var Channel = exports.Channel = (function () {
     });
     this.onError(function (reason) {
       _this.socket.log("channel", "error " + _this.topic, reason);
+      _this.state = CHANNEL_STATES.errored;
+      _this.rejoinTimer.setTimeout();
+    });
+    this.joinPush.receive("timeout", function () {
+      if (_this.state !== CHANNEL_STATES.joining) {
+        return;
+      }
+
+      _this.socket.log("channel", "timeout " + _this.topic, _this.joinPush.timeout);
       _this.state = CHANNEL_STATES.errored;
       _this.rejoinTimer.setTimeout();
     });
@@ -280,12 +302,14 @@ var Channel = exports.Channel = (function () {
     },
     join: {
       value: function join() {
+        var timeout = arguments[0] === undefined ? this.timeout : arguments[0];
+
         if (this.joinedOnce) {
           throw "tried to join multiple times. 'join' can only be called a single time per channel instance";
         } else {
           this.joinedOnce = true;
         }
-        this.sendJoin();
+        this.rejoin(timeout);
         return this.joinPush;
       }
     },
@@ -320,13 +344,16 @@ var Channel = exports.Channel = (function () {
     },
     push: {
       value: function push(event, payload) {
+        var timeout = arguments[2] === undefined ? this.timeout : arguments[2];
+
         if (!this.joinedOnce) {
           throw "tried to push '" + event + "' to '" + this.topic + "' before joining. Use channel.join() before pushing events";
         }
-        var pushEvent = new Push(this, event, payload);
+        var pushEvent = new Push(this, event, payload, timeout);
         if (this.canPush()) {
           pushEvent.send();
         } else {
+          pushEvent.startTimeout();
           this.pushBuffer.push(pushEvent);
         }
 
@@ -351,10 +378,24 @@ var Channel = exports.Channel = (function () {
       value: function leave() {
         var _this = this;
 
-        return this.push(CHANNEL_EVENTS.leave).receive("ok", function () {
+        var timeout = arguments[0] === undefined ? this.timeout : arguments[0];
+
+        var onClose = function () {
           _this.socket.log("channel", "leave " + _this.topic);
           _this.trigger(CHANNEL_EVENTS.close, "leave");
+        };
+        var leavePush = new Push(this, CHANNEL_EVENTS.leave, {}, timeout);
+        leavePush.receive("ok", function () {
+          return onClose();
+        }).receive("timeout", function () {
+          return onClose();
         });
+        leavePush.send();
+        if (!this.canPush()) {
+          leavePush.trigger("ok", {});
+        }
+
+        return leavePush;
       }
     },
     onMessage: {
@@ -374,18 +415,15 @@ var Channel = exports.Channel = (function () {
       }
     },
     sendJoin: {
-      value: function sendJoin() {
+      value: function sendJoin(timeout) {
         this.state = CHANNEL_STATES.joining;
-        this.joinPush.send();
+        this.joinPush.resend(timeout);
       }
     },
     rejoin: {
       value: function rejoin() {
-        this.sendJoin();
-        this.pushBuffer.forEach(function (pushEvent) {
-          return pushEvent.send();
-        });
-        this.pushBuffer = [];
+        var timeout = arguments[0] === undefined ? this.timeout : arguments[0];
+        this.sendJoin(timeout);
       }
     },
     trigger: {
@@ -418,6 +456,8 @@ var Socket = exports.Socket = (function () {
   // opts - Optional configuration
   //   transport - The Websocket Transport, for example WebSocket or Phoenix.LongPoll.
   //               Defaults to WebSocket with automatic LongPoll fallback.
+  //   timeout - The default timeout in milliseconds to trigger push timeouts.
+  //             Defaults `DEFAULT_TIMEOUT`
   //   heartbeatIntervalMs - The millisec interval to send a heartbeat message
   //   reconnectAfterMs - The optional function that returns the millsec
   //                      reconnect interval. Defaults to stepped backoff of:
@@ -448,10 +488,11 @@ var Socket = exports.Socket = (function () {
     this.channels = [];
     this.sendBuffer = [];
     this.ref = 0;
+    this.timeout = opts.timeout || DEFAULT_TIMEOUT;
     this.transport = opts.transport || window.WebSocket || LongPoll;
     this.heartbeatIntervalMs = opts.heartbeatIntervalMs || 30000;
     this.reconnectAfterMs = opts.reconnectAfterMs || function (tries) {
-      return [1000, 5000, 10000][tries - 1] || 10000;
+      return [1000, 2000, 5000, 10000][tries - 1] || 10000;
     };
     this.logger = opts.logger || function () {}; // noop
     this.longpollerTimeout = opts.longpollerTimeout || 20000;
@@ -639,9 +680,9 @@ var Socket = exports.Socket = (function () {
       value: function channel(topic) {
         var chanParams = arguments[1] === undefined ? {} : arguments[1];
 
-        var channel = new Channel(topic, chanParams, this);
-        this.channels.push(channel);
-        return channel;
+        var chan = new Channel(topic, chanParams, this);
+        this.channels.push(chan);
+        return chan;
       }
     },
     push: {
@@ -681,6 +722,9 @@ var Socket = exports.Socket = (function () {
     },
     sendHeartbeat: {
       value: function sendHeartbeat() {
+        if (!this.isConnected()) {
+          return;
+        }
         this.push({ topic: "phoenix", event: "heartbeat", payload: {}, ref: this.makeRef() });
       }
     },
